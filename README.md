@@ -1,5 +1,10 @@
 # MariaDB / MySQL Database Access MCP Server
 
+
+ MCP is certified by MCP Review
+ https://mcpreview.com/mcp-servers/rjsalgado/mariadb-mcp-server
+ 
+
 This MCP server provides access to MariaDB / MySQL databases.
 
 It allows you to:
