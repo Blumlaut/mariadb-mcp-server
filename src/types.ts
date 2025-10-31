@@ -12,6 +12,9 @@ export interface MariaDBConfig {
   allow_insert: boolean;
   allow_update: boolean;
   allow_delete: boolean;
+  big_int_as_number: boolean;
+  decimal_as_number: boolean;
+  check_number_range: boolean;
 }
 
 // Database information
