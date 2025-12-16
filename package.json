@@ -4,14 +4,16 @@
   "description": "An MCP server that provides access to MariaDB ou MySQL databases.",
   "type": "module",
   "bin": {
-    "mysql-mcp-server": "dist/index.js"
+    "mysql-mcp-server": "dist/index-wrapper.js",
+    "mariadb-mcp-server": "dist/index-wrapper.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "package.json"
   ],
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', '755')\"",
-    "prepare": "npm run build",
+    "prepare": "node -e \"require('fs').existsSync('dist/index.js') || require('child_process').execSync('npm run build', {stdio:'inherit'})\"",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector dist/index.js",
     "test:setup": "node test-setup.js",
@@ -29,7 +31,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rjsalgado/mariadb-mcp-server.git"
+    "url": "git+https://github.com/Blumlaut/mariadb-mcp-server.git"
   },
   "author": "Roberto Salgado <roberto@rjssistemas.com.br>",
   "license": "MIT",

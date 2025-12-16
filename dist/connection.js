@@ -1,0 +1,199 @@
+/**
+ * MariaDB connection management for MCP server
+ */
+import mariadb from "mariadb";
+import { isAlloowedQuery } from "./validators.js";
+// Default connection timeout in milliseconds
+const DEFAULT_TIMEOUT = 10000;
+// Default row limit for query results
+const DEFAULT_ROW_LIMIT = 1000;
+let pool = null;
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+function convertScalar(v) {
+    if (typeof v === "bigint") {
+        if (process.env.MARIADB_CHECK_NUMBER_RANGE === "true") {
+            if (v > MAX_SAFE || v < -MAX_SAFE) {
+                throw new Error(`BIGINT out of safe JS range: ${v.toString()}`);
+            }
+        }
+        return Number(v);
+    }
+    return v;
+}
+function normalizeRow(row) {
+    if (Array.isArray(row))
+        return row.map(normalizeRow);
+    if (row && typeof row === "object") {
+        for (const k of Object.keys(row))
+            row[k] = convertScalar(row[k]);
+    }
+    return row;
+}
+/**
+ * Create a MariaDB connection pool
+ */
+export function createConnectionPool() {
+    console.error("[Setup] Creating MariaDB connection pool");
+    const config = getConfigFromEnv();
+    if (pool) {
+        console.error("[Setup] Connection pool already exists");
+        return pool;
+    }
+    try {
+        pool = mariadb.createPool({
+            host: config.host,
+            port: config.port,
+            user: config.user,
+            password: config.password,
+            database: config.database,
+            connectionLimit: 2,
+            connectTimeout: DEFAULT_TIMEOUT,
+            bigIntAsNumber: config.big_int_as_number,
+            decimalAsNumber: config.decimal_as_number,
+            checkNumberRange: config.check_number_range,
+        });
+    }
+    catch (error) {
+        console.error("[Error] Failed to create connection pool:", error);
+        throw error;
+    }
+    return pool;
+}
+function shouldRetryWithFreshPool(error) {
+    const message = error?.message?.toLowerCase?.() ?? "";
+    const sqlState = error?.sqlState;
+    const fatal = Boolean(error?.fatal);
+    const code = error?.code;
+    if (fatal)
+        return true;
+    if (typeof sqlState === "string" && sqlState.startsWith("08"))
+        return true;
+    if (code === "ER_CONN_NOT_CONNECTED")
+        return true;
+    return (message.includes("connection lost") ||
+        message.includes("connection closed") ||
+        message.includes("not connected") ||
+        message.includes("pool is closed") ||
+        message.includes("write after end"));
+}
+async function resetPool() {
+    if (pool) {
+        try {
+            await pool.end();
+        }
+        catch (error) {
+            console.error("[Error] Failed to close pool during reset:", error);
+        }
+    }
+    pool = null;
+}
+/**
+ * Execute a query with error handling and logging
+ */
+export async function executeQuery(sql, params = [], database) {
+    console.error(`[Query] Executing: ${sql}`);
+    let hasRetried = false;
+    while (true) {
+        if (!pool) {
+            console.error("[Setup] Connection pool not found, creating a new one");
+            pool = createConnectionPool();
+        }
+        let activeConnection = null;
+        try {
+            activeConnection = await pool.getConnection();
+            if (database) {
+                console.error(`[Query] Using database: ${database}`);
+                await activeConnection.query(`USE \`${database}\``);
+            }
+            if (!isAlloowedQuery(sql)) {
+                throw new Error("Query not allowed");
+            }
+            const result = await activeConnection.query({
+                sql,
+                namedPlaceholders: true,
+                metaAsArray: true,
+                timeout: DEFAULT_TIMEOUT,
+            }, params);
+            const rows = result;
+            const fields = result?.meta ?? [];
+            const limitedRows = Array.isArray(rows) && rows.length > DEFAULT_ROW_LIMIT
+                ? rows.slice(0, DEFAULT_ROW_LIMIT)
+                : rows;
+            const normalizedRows = normalizeRow(limitedRows);
+            console.error(`[Query] Success: ${Array.isArray(rows) ? rows.length : 1} rows returned with ${JSON.stringify(params)}`);
+            return { rows: normalizedRows, fields };
+        }
+        catch (error) {
+            console.error("[Error] Query execution failed:", error);
+            if (!hasRetried && shouldRetryWithFreshPool(error)) {
+                hasRetried = true;
+                await resetPool();
+                continue;
+            }
+            throw error;
+        }
+        finally {
+            if (activeConnection) {
+                try {
+                    activeConnection.release();
+                    console.error("[Query] Connection released");
+                }
+                catch (releaseError) {
+                    console.error("[Error] Failed to release connection:", releaseError);
+                }
+            }
+        }
+    }
+}
+/**
+ * Get MariaDB connection configuration from environment variables
+ */
+export function getConfigFromEnv() {
+    const host = process.env.MARIADB_HOST;
+    const portStr = process.env.MARIADB_PORT;
+    const user = process.env.MARIADB_USER;
+    const password = process.env.MARIADB_PASSWORD;
+    const database = process.env.MARIADB_DATABASE;
+    const allow_insert = process.env.MARIADB_ALLOW_INSERT === "true";
+    const allow_update = process.env.MARIADB_ALLOW_UPDATE === "true";
+    const allow_delete = process.env.MARIADB_ALLOW_DELETE === "true";
+    const big_int_as_number = process.env.MARIADB_BIG_INT_AS_NUMBER === "true";
+    const decimal_as_number = process.env.MARIADB_DECIMAL_AS_NUMBER === "true";
+    const check_number_range = process.env.MARIADB_CHECK_NUMBER_RANGE === "true";
+    if (!host)
+        throw new Error("MARIADB_HOST environment variable is required");
+    if (!user)
+        throw new Error("MARIADB_USER environment variable is required");
+    if (!password)
+        throw new Error("MARIADB_PASSWORD environment variable is required");
+    const port = portStr ? parseInt(portStr, 10) : 3306;
+    console.error("[Setup] MariaDB configuration:", {
+        host: host,
+        port: port,
+        user: user,
+        database: database || "(default not set)",
+        bigIntAsNumber: big_int_as_number,
+        decimalAsNumber: decimal_as_number,
+        checkNumberRange: check_number_range,
+    });
+    return {
+        host,
+        port,
+        user,
+        password,
+        database,
+        allow_insert,
+        allow_update,
+        allow_delete,
+        big_int_as_number,
+        decimal_as_number,
+        check_number_range,
+    };
+}
+export function endConnection() {
+    if (pool) {
+        const closing = pool.end();
+        pool = null;
+        return closing;
+    }
+}
