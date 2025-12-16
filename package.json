@@ -4,16 +4,16 @@
   "description": "An MCP server that provides access to MariaDB ou MySQL databases.",
   "type": "module",
   "bin": {
-    "mysql-mcp-server": "dist/index.js"
+    "mysql-mcp-server": "dist/index-bundle.cjs",
+    "mariadb-mcp-server": "dist/index-bundle.cjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "package.json"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', '755')\"",
-    "prepare": "npm run build",
-    "watch": "tsc --watch",
-    "inspector": "npx @modelcontextprotocol/inspector dist/index.js",
+    "build": "node ./scripts/bundle.mjs && node -e \"const fs=require('fs');fs.existsSync('dist/index-bundle.cjs')&&fs.chmodSync('dist/index-bundle.cjs','755')\"",
+    "inspector": "npx @modelcontextprotocol/inspector dist/index-bundle.cjs",
     "test:setup": "node test-setup.js",
     "test:tools": "node test-tools.js",
     "test": "npm run test:setup && npm run test:tools"
@@ -29,7 +29,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rjsalgado/mariadb-mcp-server.git"
+    "url": "git+https://github.com/Blumlaut/mariadb-mcp-server.git"
   },
   "author": "Roberto Salgado <roberto@rjssistemas.com.br>",
   "license": "MIT",
@@ -40,6 +40,7 @@
   "devDependencies": {
     "@types/node": "^22.13.16",
     "dotenv": "^16.4.7",
+    "esbuild": "^0.24.2",
     "prettier": "^3.6.2",
     "typescript": "^5.8.2"
   }

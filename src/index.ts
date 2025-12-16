@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * MariaDB Database Access MCP Server
  *
