@@ -13,7 +13,6 @@ const DEFAULT_TIMEOUT = 10000;
 const DEFAULT_ROW_LIMIT = 1000;
 
 let pool: mariadb.Pool | null = null;
-let connection: mariadb.PoolConnection | null = null;
 
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 
@@ -67,6 +66,36 @@ export function createConnectionPool(): mariadb.Pool {
   return pool;
 }
 
+function shouldRetryWithFreshPool(error: unknown): boolean {
+  const message = (error as any)?.message?.toLowerCase?.() ?? "";
+  const sqlState = (error as any)?.sqlState;
+  const fatal = Boolean((error as any)?.fatal);
+  const code = (error as any)?.code;
+
+  if (fatal) return true;
+  if (typeof sqlState === "string" && sqlState.startsWith("08")) return true;
+  if (code === "ER_CONN_NOT_CONNECTED") return true;
+
+  return (
+    message.includes("connection lost") ||
+    message.includes("connection closed") ||
+    message.includes("not connected") ||
+    message.includes("pool is closed") ||
+    message.includes("write after end")
+  );
+}
+
+async function resetPool() {
+  if (pool) {
+    try {
+      await pool.end();
+    } catch (error) {
+      console.error("[Error] Failed to close pool during reset:", error);
+    }
+  }
+  pool = null;
+}
+
 /**
  * Execute a query with error handling and logging
  */
@@ -76,69 +105,74 @@ export async function executeQuery(
   database?: string,
 ): Promise<{ rows: any; fields: mariadb.FieldInfo[] }> {
   console.error(`[Query] Executing: ${sql}`);
-  // Create connection pool if not already created
-  if (!pool) {
-    console.error("[Setup] Connection pool not found, creating a new one");
-    pool = createConnectionPool();
-  }
+  let hasRetried = false;
 
-  try {
-    // Get connection from pool
-    if (connection) {
-      console.error("[Query] Reusing existing connection");
-    } else {
-      console.error("[Query] Creating new connection");
-      connection = await pool.getConnection();
+  while (true) {
+    if (!pool) {
+      console.error("[Setup] Connection pool not found, creating a new one");
+      pool = createConnectionPool();
     }
 
-    // Use specific database if provided
-    if (database) {
-      console.error(`[Query] Using database: ${database}`);
-      await connection.query(`USE \`${database}\``);
-    }
+    let activeConnection: mariadb.PoolConnection | null = null;
 
-    if (!isAlloowedQuery(sql)) {
-      throw new Error("Query not allowed");
-    }
+    try {
+      activeConnection = await pool.getConnection();
 
-    const result: any = await connection.query(
-      {
-        sql,
-        namedPlaceholders: true,
-        metaAsArray: true,
-        timeout: DEFAULT_TIMEOUT,
-      },
-      params,
-    );
+      if (database) {
+        console.error(`[Query] Using database: ${database}`);
+        await activeConnection.query(`USE \`${database}\``);
+      }
 
-    const rows = result;
-    const fields: mariadb.FieldInfo[] = (result as any)?.meta ?? [];
+      if (!isAlloowedQuery(sql)) {
+        throw new Error("Query not allowed");
+      }
 
-    // Apply row limit if result is an array
-    const limitedRows =
-      Array.isArray(rows) && rows.length > DEFAULT_ROW_LIMIT
-        ? rows.slice(0, DEFAULT_ROW_LIMIT)
-        : rows;
+      const result: any = await activeConnection.query(
+        {
+          sql,
+          namedPlaceholders: true,
+          metaAsArray: true,
+          timeout: DEFAULT_TIMEOUT,
+        },
+        params,
+      );
 
-    const normalizedRows = normalizeRow(limitedRows);
+      const rows = result;
+      const fields: mariadb.FieldInfo[] = (result as any)?.meta ?? [];
 
-    // Log result summary
-    console.error(
-      `[Query] Success: ${
-        Array.isArray(rows) ? rows.length : 1
-      } rows returned with ${JSON.stringify(params)}`,
-    );
+      const limitedRows =
+        Array.isArray(rows) && rows.length > DEFAULT_ROW_LIMIT
+          ? rows.slice(0, DEFAULT_ROW_LIMIT)
+          : rows;
 
-    return { rows: normalizedRows, fields };
-  } catch (error) {
-    console.error("[Error] Query execution failed:", error);
-    throw error;
-  } finally {
-    // Release connection back to pool
-    if (connection) {
-      connection.release();
-      connection = null;
-      console.error("[Query] Connection released");
+      const normalizedRows = normalizeRow(limitedRows);
+
+      console.error(
+        `[Query] Success: ${
+          Array.isArray(rows) ? rows.length : 1
+        } rows returned with ${JSON.stringify(params)}`,
+      );
+
+      return { rows: normalizedRows, fields };
+    } catch (error) {
+      console.error("[Error] Query execution failed:", error);
+
+      if (!hasRetried && shouldRetryWithFreshPool(error)) {
+        hasRetried = true;
+        await resetPool();
+        continue;
+      }
+
+      throw error;
+    } finally {
+      if (activeConnection) {
+        try {
+          activeConnection.release();
+          console.error("[Query] Connection released");
+        } catch (releaseError) {
+          console.error("[Error] Failed to release connection:", releaseError);
+        }
+      }
     }
   }
 }
@@ -193,6 +227,8 @@ export function getConfigFromEnv(): MariaDBConfig {
 
 export function endConnection() {
   if (pool) {
-    return pool.end();
+    const closing = pool.end();
+    pool = null;
+    return closing;
   }
 }
